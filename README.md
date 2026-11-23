@@ -52,7 +52,7 @@ specification itself, so `gio` is not required.
 ## 2. Installing
 
 Here is a one-command method for installing:
-    curl -fsSL https://raw.githubusercontent.com/elvishcraftsman/rind/main/install_rind.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/elvishcraftsman/rind/main/install.sh | bash
 
 All methods start from the project folder (the one containing `pyproject.toml`).
 

@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_URL="https://github.com/elvishcraftsman/rind"
 REPO_NAME="rind"
 TEMP_DIR=""
+BIN_DIR="$HOME/.local/bin"
 
 cleanup() {
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
@@ -11,6 +12,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+mkdir -p "$BIN_DIR"
 
 echo "==> Preparing installation for $REPO_NAME..."
 
@@ -35,6 +38,12 @@ TEMP_DIR=$(mktemp -d)
 echo "--> Cloning $REPO_URL..."
 git clone "$REPO_URL.git" "$TEMP_DIR/$REPO_NAME"
 
+check_path_warning() {
+  if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    echo "Note: Make sure $BIN_DIR is added to your PATH so 'rind' can be run from anywhere."
+  fi
+}
+
 # ==============================================================================
 # 1. OPTION A: pipx or uv (recommended)
 # ==============================================================================
@@ -42,9 +51,11 @@ if command -v uv &>/dev/null; then
   echo "--> 'uv' detected. Attempting Option A (uv tool install)..."
   if uv tool install --directory "$TEMP_DIR/$REPO_NAME" '.[images]'; then
     echo "==> Successfully installed $REPO_NAME via uv!"
+    check_path_warning
     exit 0
   elif uv tool install --directory "$TEMP_DIR/$REPO_NAME" .; then
     echo "==> Successfully installed $REPO_NAME via uv (without image support)!"
+    check_path_warning
     exit 0
   else
     echo "--> uv tool install failed. Trying next method..."
@@ -55,9 +66,11 @@ if command -v pipx &>/dev/null; then
   echo "--> 'pipx' detected. Attempting Option A (pipx install)..."
   if pipx install "$TEMP_DIR/$REPO_NAME[images]"; then
     echo "==> Successfully installed $REPO_NAME via pipx!"
+    check_path_warning
     exit 0
   elif pipx install "$TEMP_DIR/$REPO_NAME"; then
     echo "==> Successfully installed $REPO_NAME via pipx (without image support)!"
+    check_path_warning
     exit 0
   else
     echo "--> pipx install failed. Trying next method..."
@@ -71,18 +84,14 @@ if command -v python3 &>/dev/null; then
   echo "--> Python 3 detected. Attempting Option B (venv in ~/.local/share)..."
   
   VENV_DIR="$HOME/.local/share/rind-venv"
-  BIN_DIR="$HOME/.local/bin"
   
   if python3 -m venv "$VENV_DIR" 2>/dev/null; then
     if "$VENV_DIR/bin/pip" install "$TEMP_DIR/$REPO_NAME[images]" 2>/dev/null || \
        "$VENV_DIR/bin/pip" install "$TEMP_DIR/$REPO_NAME" 2>/dev/null; then
-      mkdir -p "$BIN_DIR"
       ln -sf "$VENV_DIR/bin/rind" "$BIN_DIR/rind"
       
       echo "==> Successfully installed $REPO_NAME to $BIN_DIR/rind!"
-      if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-        echo "Note: Make sure $BIN_DIR is added to your PATH."
-      fi
+      check_path_warning
       exit 0
     fi
   fi
@@ -108,7 +117,7 @@ else
 fi
 
 # ==============================================================================
-# 3. OPTION C: Run from folder without installing
+# 3. OPTION C: Run from folder without installing (with wrapper in ~/.local/bin)
 # ==============================================================================
 echo "--> Attempting Option C (setting up local folder environment)..."
 
@@ -117,9 +126,16 @@ mkdir -p "$TARGET_DIR"
 cp -r "$TEMP_DIR/$REPO_NAME/"* "$TARGET_DIR/"
 
 if (cd "$TARGET_DIR" && python3 -m venv .venv && .venv/bin/pip install textual); then
-  echo "==> Option C setup complete!"
-  echo "To run $REPO_NAME, execute:"
-  echo "  cd $TARGET_DIR && .venv/bin/python -m rind"
+  # Create a wrapper executable script so command 'rind' simply works
+  cat <<'EOF' > "$BIN_DIR/rind"
+#!/usr/bin/env bash
+cd "$HOME/rind" && exec .venv/bin/python -m rind "$@"
+EOF
+  chmod +x "$BIN_DIR/rind"
+
+  echo "==> Option C setup complete! Command wrapper created at $BIN_DIR/rind"
+  echo "You can now run 'rind' directly from your terminal."
+  check_path_warning
   exit 0
 fi
 
@@ -131,9 +147,7 @@ echo "--> Option C failed to configure. Proceeding to fourth option (Option B fa
 echo "--> Executing Option B fallback using freshly installed package manager Python..."
 
 VENV_DIR="$HOME/.local/share/rind-venv"
-BIN_DIR="$HOME/.local/bin"
 
-mkdir -p "$BIN_DIR"
 python3 -m venv "$VENV_DIR"
 
 if "$VENV_DIR/bin/pip" install "$TEMP_DIR/$REPO_NAME[images]"; then
@@ -147,6 +161,4 @@ else
   exit 1
 fi
 
-if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-  echo "Note: Make sure $BIN_DIR is added to your PATH."
-fi
+check_path_warning
