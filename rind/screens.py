@@ -16,7 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, OptionList, ProgressBar, Static
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, ProgressBar, Select, Static
 from textual.widgets.option_list import Option
 
 from .fileops import Job, human, is_real_dir, path_size
@@ -443,6 +443,22 @@ class PropertiesScreen(ModalScreen[Optional[tuple]]):
                 self.st = None
         self.editable = self.st is not None and not os.path.islink(paths[0]) and (
             self.st.st_uid == os.getuid() or os.getuid() == 0)
+        self.owner_name = ""
+        self.group_options: list[tuple[str, int]] = []
+        if self.st is not None:
+            try:
+                self.owner_name = pwd.getpwuid(self.st.st_uid).pw_name
+            except KeyError:
+                self.owner_name = str(self.st.st_uid)
+            gids = {g.gr_gid for g in grp.getgrall()} if os.getuid() == 0 else \
+                {os.getgid(), self.st.st_gid, *os.getgroups()}
+            for gid in sorted(gids):
+                try:
+                    name = grp.getgrgid(gid).gr_name
+                except KeyError:
+                    name = str(gid)
+                self.group_options.append((name, gid))
+            self.group_options.sort(key=lambda o: o[0].casefold())
 
     # ----- text
     def info(self) -> Text:
@@ -524,6 +540,14 @@ class PropertiesScreen(ModalScreen[Optional[tuple]]):
                             yield Checkbox(name, value=bool(mode & _BITS[who + bit]), id=f"p-{who}{bit}",
                                            disabled=not self.editable)
                 yield Label("", id="octal")
+                yield Label(Text("Ownership" + ("" if self.editable else "  (read-only)"), style="bold"))
+                with Horizontal(classes="permrow"):
+                    yield Label(f"{'Owner':<8}")
+                    yield Input(value=self.owner_name, id="p-owner", disabled=os.getuid() != 0)
+                    yield Label("  Group ")
+                    yield Select(self.group_options, value=self.st.st_gid, allow_blank=False, id="p-group",
+                                 disabled=not self.editable)
+                yield Label("", id="perror")
                 if is_real_dir(self.paths[0]):
                     yield Checkbox("Apply to everything inside (files keep their execute state)", id="rec",
                                    disabled=not self.editable)
@@ -574,10 +598,23 @@ class PropertiesScreen(ModalScreen[Optional[tuple]]):
             special = stat.S_IMODE(self.st.st_mode) & 0o7000
             rec = bool(self.query("#rec") and self.query_one("#rec", Checkbox).value)
             new = self._mode() | special
-            if new == stat.S_IMODE(self.st.st_mode) and not rec:
+            uid: Optional[int] = None
+            gid: Optional[int] = None
+            owner = self.query_one("#p-owner", Input).value.strip()
+            if owner and owner != self.owner_name:
+                try:
+                    uid = int(owner) if owner.isdigit() else pwd.getpwnam(owner).pw_uid
+                except KeyError:
+                    self.job = Job()
+                    self.query_one("#perror", Label).update(Text(f"No such user: {owner}", style="red"))
+                    return
+            sel = self.query_one("#p-group", Select).value
+            if isinstance(sel, int) and sel != self.st.st_gid:
+                gid = sel
+            if new == stat.S_IMODE(self.st.st_mode) and uid is None and gid is None and not rec:
                 self.dismiss(None)
             else:
-                self.dismiss(("apply", new, rec))
+                self.dismiss(("apply", new, rec, uid, gid))
         else:
             self.dismiss(None)
 

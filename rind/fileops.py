@@ -563,3 +563,33 @@ def apply_mode(path: Path, mode: int, recursive: bool = False) -> list[tuple[Pat
                 pass
         raise
     return changed
+
+
+def apply_owner(path: Path, uid: int, gid: int, recursive: bool = False) -> list[tuple[Path, int, int]]:
+    """chown path (and, if recursive, everything inside it). uid or gid of -1 means 'leave as is'.
+    Symlinks themselves are changed, never followed. Returns [(path, old_uid, old_gid)] for undo;
+    on failure everything already changed is rolled back."""
+    changed: list[tuple[Path, int, int]] = []
+
+    def one(p: Path) -> None:
+        st = os.lstat(p)
+        new_u = st.st_uid if uid < 0 else uid
+        new_g = st.st_gid if gid < 0 else gid
+        if (new_u, new_g) != (st.st_uid, st.st_gid):
+            os.lchown(p, new_u, new_g)
+            changed.append((p, st.st_uid, st.st_gid))
+
+    try:
+        if recursive and is_real_dir(path):
+            for dp, dns, fns in os.walk(path, topdown=False, followlinks=False):
+                for n in fns + dns:
+                    one(Path(dp) / n)
+        one(path)
+    except OSError:
+        for p, ou, og in reversed(changed):
+            try:
+                os.lchown(p, ou, og)
+            except OSError:
+                pass
+        raise
+    return changed

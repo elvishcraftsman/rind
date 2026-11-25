@@ -3,7 +3,7 @@ from pathlib import Path
 home = Path(tempfile.mkdtemp())
 for k, v in {"HOME": home, "XDG_DATA_HOME": home/"data", "XDG_STATE_HOME": home/"state", "XDG_CONFIG_HOME": home/"cfg"}.items():
     os.environ[k] = str(v)
-sys.path.insert(0, "/home/claude/rind")
+sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), ".."))
 from rind.app import RindApp, FileTable
 from rind.screens import JumpScreen, PromptScreen, ConfirmScreen, MenuScreen
 from textual.widgets import OptionList

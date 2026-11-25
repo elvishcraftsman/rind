@@ -4,7 +4,7 @@ home = Path(tempfile.mkdtemp())
 for k, v in {"HOME": home, "XDG_DATA_HOME": home/"data", "XDG_STATE_HOME": home/"state", "XDG_CONFIG_HOME": home/"cfg",
              "XDG_CACHE_HOME": home/"cache", "XDG_DATA_DIRS": str(home/"share2")}.items():
     os.environ[k] = str(v)
-sys.path.insert(0, "/home/claude/rind")
+sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), ".."))
 from rind import devices as D, openwith as O
 from rind.app import RindApp, FileTable, PlaceItem, DeviceItem
 from rind.screens import MenuScreen, PropertiesScreen, OpenWithScreen

@@ -2,7 +2,7 @@ import errno, os, sys, tempfile
 from pathlib import Path
 tmp = Path(tempfile.mkdtemp())
 os.environ["XDG_DATA_HOME"] = str(tmp / "data")
-sys.path.insert(0, "/home/claude/rind")
+sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), ".."))
 from rind import fileops as F
 from rind.search import match_name, find_files
 

@@ -14,8 +14,9 @@ editor: everything works by pointing and clicking, and everything also has a key
 - A **menu bar** (File, Edit, View, Go, Tools, Help) with every command and its shortcut
 - **Archives**: open zip/tar files like folders (read-only), extract, compress
 - A clickable **breadcrumb** path, back **and forward** history, new file and duplicate
-- **Tabs**, with copy/move to the other tab, and **drag and drop** onto folders, sidebar places, tabs, path segments and the Trash
-- **Properties** (details and a permissions editor), an **Open with…** chooser, and a **Devices** list with mount/unmount
+- **Tabs** and a true **split view** (two panes side by side), with copy/move to the other pane and **drag and drop** onto folders, sidebar places, tabs, panes, path segments and the Trash
+- **Redo** as well as undo
+- **Properties** (details, permissions and group/owner editor), an **Open with…** chooser, and a **Devices** list with mount/unmount
 - **Jump** to frequently used folders by typing part of the path
 - **Run a command** on the selection, or open a shell in the current folder
 - **Git status markers** and the current branch
@@ -23,7 +24,10 @@ editor: everything works by pointing and clicking, and everything also has a key
 - **Bulk rename**: pattern (regex + counter) or in your `$EDITOR`
 - Open files with the system default or tools you configure per extension
 - **cd on exit**: your shell lands in the folder you were browsing
-- **Built-in updater**: `rind --update`
+- **Drag files in**: drop files from your file manager onto the terminal window to copy or move them here
+- **Get files out** with three workarounds (system clipboard, a ripdrag/dragon window, or your file manager)
+- **Configurable shortcuts**: every key can be changed under `[keys]` in `config.toml`
+- **Built-in updater**: `rind --update` (from GitHub releases)
 
 rind is a small Python package built on [Textual](https://textual.textualize.io/).
 
@@ -51,12 +55,22 @@ specification itself, so `gio` is not required.
 
 ## 2. Installing
 
-Here is a one-command method for installing:
-    curl -fsSL https://raw.githubusercontent.com/elvishcraftsman/rind/main/install.sh | bash
+### Quick install (recommended)
 
-All methods start from the project folder (the one containing `pyproject.toml`).
+```sh
+curl -fsSL https://raw.githubusercontent.com/elvishcraftsman/rind/main/install.sh | bash
+```
 
-### Option A: pipx or uv (recommended)
+`install.sh` installs the newest release (or `main` until a release exists) with **uv**, else
+**pipx**, else a private virtual environment under `~/.local/share/rind/venv` linked from
+`~/.local/bin/rind`. It also adds Pillow for image previews (`RIND_NO_IMAGES=1` skips that),
+needs Python 3.10 or newer, and can be re-run any time to upgrade. `RIND_REF=v0.8.0` installs a
+specific tag or branch; `./install.sh --uninstall` removes rind again. Run from a checkout,
+it installs that folder instead of downloading.
+
+The manual methods below all start from the project folder (the one containing `pyproject.toml`).
+
+### Option A: pipx or uv
 
 ```sh
 cd rind
@@ -84,6 +98,8 @@ cd rind
 python3 -m venv .venv && .venv/bin/pip install textual
 .venv/bin/python -m rind
 ```
+
+(A source folder can't update itself with `rind --update`; use `git pull`.)
 
 ### Prerequisites by distribution
 
@@ -130,8 +146,10 @@ rm -rf ~/.config/rind ~/.local/state/rind             # optional: config and his
 
 ## 3. Updating
 
-rind can update itself from a release source you choose. Nothing is contacted until
-you configure one.
+rind can update itself from published **GitHub releases**. The default source is
+`github:elvishcraftsman/rind`, so out of the box rind checks that repository (at most once a day,
+at start-up) and tells you when a newer release exists. It never installs anything on its own.
+To turn the automatic check off, set `check = false` below; to use a fork, set `source`.
 
 ### Set up a source
 
@@ -139,8 +157,8 @@ Edit `~/.config/rind/config.toml`:
 
 ```toml
 [update]
-source = "github:youruser/rind"      # latest published GitHub release
-check = true                         # check automatically (default true once a source is set)
+source = "github:elvishcraftsman/rind"   # the default; https://github.com/owner/repo works too
+check = true                         # check automatically at start-up (default true)
 interval_hours = 24                  # how often the automatic check runs
 ```
 
@@ -148,7 +166,7 @@ Two kinds of source are supported:
 
 | Source | What rind does |
 |---|---|
-| `github:owner/repo` | asks GitHub for the latest **release**, then downloads that tag's source archive |
+| `github:owner/repo` | asks GitHub for the latest **release**, then downloads its `rind-*.whl` file (checked against the release's `SHA256SUMS`), or the tag's source archive if there is no wheel |
 | `https://host/path/latest.json` | reads a manifest and downloads the archive it points to |
 
 A manifest looks like this (`sha256` is optional but recommended; relative URLs are
@@ -158,7 +176,7 @@ resolved against the manifest's address):
 { "version": "0.4.0", "url": "rind-0.4.0.tar.gz", "sha256": "<hex digest>", "notes": "What changed" }
 ```
 
-To bake a default into your own copy, set `DEFAULT_SOURCE` at the top of
+To bake a different default into your own copy, change `DEFAULT_SOURCE` at the top of
 `rind/updater.py`.
 
 ### Updating
@@ -170,9 +188,9 @@ rind --update --yes       # no confirmation prompt
 rind --update --update-source github:owner/repo     # one-off source override
 ```
 
-Inside rind, press `u` to check now (a dialog offers to install). With a source
-configured, rind also checks quietly in the background at start-up (at most once per
-`interval_hours`) and shows a notification, never installing anything on its own.
+Inside rind, press `u` to check now (a dialog offers to install). Unless `check = false`, rind also
+checks quietly in the background at start-up (at most once per `interval_hours`) and shows a
+notification. Until the first release is published, the check reports that there is none.
 
 After an update, restart rind to run the new version.
 
@@ -186,7 +204,7 @@ a source folder, it won't touch your files; update the folder yourself.
 ### Safety and privacy
 
 - Only `https://` sources are accepted (plain `http://` only for `localhost`).
-- If a manifest gives a `sha256`, a mismatching download is refused.
+- If a manifest gives a `sha256`, or a release carries `SHA256SUMS`, a mismatching download is refused.
 - Installing runs the downloaded package's build, so **only point `source` at a
   repository you trust**. GitHub release archives carry no checksum, so for them
   you are trusting the repository and GitHub.
@@ -195,13 +213,25 @@ a source folder, it won't touch your files; update the folder yourself.
 
 ### For maintainers: publishing a release
 
-1. Bump the version in **both** `pyproject.toml` and `rind/__init__.py`.
-2. Commit, tag (`git tag v0.4.0`) and push the tag.
-3. On GitHub, create a **Release** from that tag. Only published releases count;
-   a bare tag is not enough.
+```sh
+./build.sh patch          # or minor / major / 1.2.3; with no argument it releases the current version
+./build.sh --dry-run patch    # everything except commit, tag, push and publish
+```
 
-For a manifest-based source: build the archive (`python -m build --sdist` or
-`tar czf`), compute its SHA-256, upload it with `latest.json`.
+`build.sh` checks that the tree is clean and up to date, runs the tests, builds the wheel and
+source archive into `dist/`, installs the wheel into a fresh environment to prove it runs, writes
+`SHA256SUMS`, commits the version bump (both `pyproject.toml` and `rind/__init__.py`), tags
+`vX.Y.Z`, pushes the branch and the tag, and creates the GitHub release with the three files
+attached. Release notes default to the commit messages since the last tag (`--notes FILE` to write
+your own, `--draft` to review on GitHub first, `--quick` to skip tests and the smoke test).
+
+It publishes with the `gh` CLI if you ran `gh auth login`, otherwise with a token in
+`GITHUB_TOKEN` (permission to write repository contents). With neither, it pushes the tag and tells
+you how to finish in the browser. Only published releases count for updates; a bare tag is not
+enough.
+
+For a manifest-based source: build the archive (`python -m build --sdist`), compute its SHA-256,
+upload it with `latest.json`.
 
 ---
 
@@ -281,12 +311,18 @@ Click outside a popup menu to close it.
 | Key | Action |
 |---|---|
 | `Enter` | open |
+| `g` | **drag out** menu: system clipboard / drag window / file manager |
+| `Alt+C` | copy the selected files to the **system clipboard** as a file list |
+| `Alt+D` | open a **drag window** (ripdrag or dragon) |
+| `Alt+F` | **show** the folder (and selection) **in your file manager** |
 | `Backspace` or `Alt+Up` | go up one folder |
 | `Alt+Left` | go back |
 | `Ctrl+L` | edit the path |
 | `F10` / `F9` / `Alt+M` | open the menu bar |
 | `Alt+Right` | go forward |
 | `Ctrl+T` / `Ctrl+W` | new tab / close tab |
+| `F4` | split view on/off (two panes) |
+| `Tab` | in split view: switch to the other pane |
 | `Alt+1` … `Alt+9`, `Ctrl+PgUp`/`Ctrl+PgDn` | switch tabs |
 | `/` | filter this folder as you type |
 | `Ctrl+F` | search names in this folder and all subfolders |
@@ -302,6 +338,7 @@ Click outside a popup menu to close it.
 | `Ctrl+R` | rename the selection in your `$EDITOR` |
 | `Delete` or `d` | move to trash (permanent delete inside the Trash) |
 | `z` / `Ctrl+Z` | undo |
+| `Z` (Shift+Z) / `Ctrl+Y` | redo |
 | `R` | restore from the Trash (Shift+R, inside the Trash) |
 | `n` / `Ctrl+N` | new folder |
 | `N` (Shift+N) | new empty file |
@@ -377,8 +414,11 @@ inside the Trash, where it was deleted from. Control characters in files are sho
   place, or `name (copy)` if that is taken), `d` deletes permanently, and the context
   menu has *Empty trash*.
 - **Undo** (`z`, the Undo button, or the context menu) reverses, most recent first, up
-  to 50 steps in this session: copy, move, trash, rename and new folder. Permanent
-  deletes and emptying the trash can't be undone. There is no redo.
+  to 50 steps in this session: copy, move, trash, rename, new file/folder, permission and
+  ownership changes, extraction and compression. Permanent deletes and emptying the trash
+  can't be undone. **Redo** (`Z`/`Ctrl+Y`, or Edit → Redo) repeats what you just undid, in
+  order; doing anything new clears the redo list. Extraction and compression can be undone
+  but not redone (undoing one drops any older redo steps, so they never run out of order).
 
 ### Tabs
 
@@ -389,26 +429,83 @@ folder, back/forward history, marked items, filter and cursor position. Switch w
 terminals that don't send those keys). `Ctrl+W` or the `×` closes a tab; the last one can't be
 closed. Sorting, hidden files, columns and the preview setting are shared by all tabs.
 
-There is no side-by-side view. To move things between two folders, open both in tabs and use
-`y` (copy) or `Y` (move) to send the selection to the other tab (a menu asks which tab when
-there are more than two), or drag onto a tab label.
+For two folders side by side, use the split view below. Without it, `y` (copy) or `Y` (move)
+sends the selection to the other tab (a menu asks which tab when there are more than two),
+or you can drag onto a tab label.
+
+### Split view
+
+`F4` (or *View → Split view*) shows two file lists side by side. Under the hood the panes are
+two tabs, so each keeps its own folder, history, marks and filter. The pane you last clicked,
+focused or switched to (`Tab` moves between them) is the **active** one: the path bar,
+breadcrumb line, status line, menus and keyboard commands all act on it. With one tab open,
+the right pane starts as a copy of the current folder in a new tab; with several, it shows the
+next tab.
+
+- **Copy / move between panes**: `y` copies and `Y` moves the selection into the other pane's
+  folder (Edit menu: *Copy/Move to other pane*), or drag items across and drop them anywhere
+  on the other pane, or onto one of its folders. It is the same job as a paste, with conflict
+  dialog, progress and undo.
+- The inactive pane updates itself when its folder changes (checked every two seconds),
+  and sort order, columns and hidden files apply to both panes.
+- Opening or closing tabs while split replaces or removes the pane's tab as you'd expect, and
+  closing the other pane's tab leaves split view. `F4` again returns to a single list; the
+  other pane's folder stays open as an ordinary tab.
 
 ### Drag and drop
 
 Press on an item (or on any marked item to drag the whole marked set), move the mouse, and
 release over:
 
-- a **folder** in the list, a **sidebar place** (including a mounted device), a **path segment**
-  in the breadcrumb line, or a **tab label**: the items are **moved** there, or **copied** if
-  `Ctrl` is held when you release;
+- a **folder** in the list, **anywhere on the other pane** in split view, a **sidebar place**
+  (including a mounted device), a **path segment** in the breadcrumb line, or a **tab label**:
+  the items are **moved** there, or **copied** if `Ctrl` is held when you release;
 - the **Trash** place: the items are moved to the trash.
 
 While you drag, the status line names the target. `Esc` cancels. It uses the same conflict
 dialog, progress bar and undo as paste. Items dragged out of an archive are always copied;
-nothing can be dropped into an archive. Drag and drop only works inside rind: a terminal
-program can't drag files to or from other applications. It needs a terminal that reports
+nothing can be dropped into an archive. Mouse drag and drop like this works inside rind. A terminal
+program can't start a real drag to another window, or receive one directly, but see the next
+two sections for what does work. It needs a terminal that reports
 mouse movement while a button is held (most do; some multiplexer setups don't, so use `y`/`Y`
 or cut and paste instead).
+
+### Dropping files onto the terminal (drag in)
+
+Most terminals (GNOME Terminal and Console, Konsole, kitty, WezTerm, Alacritty, foot, and others)
+paste the path when you drop a file onto their window. rind reads that: **drag files from your
+file manager onto the terminal running rind** and a small menu asks *Copy N items here*, *Move N
+items here* or *Cancel*. It uses the same conflict dialog, progress bar and undo as paste, and
+copies or moves into the folder you are looking at. Quoted paths, backslash-escaped paths and
+`file://` URIs are all understood; a drop that isn't an existing path is ignored with a notice.
+Dropping into the trash, or into an archive, is refused.
+
+To skip the question: `[drop] action = "copy"` (or `"move"`) in `config.toml`. If the path bar or
+filter box has the focus, the dropped text goes into that box instead, as you'd expect.
+
+### Getting files out of rind (drag out)
+
+Terminals can't start a drag to another application, so rind offers three workarounds for the
+selected files (the marked files, or the one under the cursor). Press `g` for a menu of them, or
+use the keys directly; they are also in the File menu and the right-click menu.
+
+1. **System clipboard** (`Alt+C`): puts the files on the clipboard as a *file list*, so `Ctrl+V` in
+   your file manager pastes (copies) them. It needs `wl-clipboard` (Wayland) or `xclip` (X11).
+   The format follows your desktop: GNOME Files, Nemo, Caja, Thunar and PCManFM read
+   `x-special/gnome-copied-files`; Dolphin and other Qt managers read `text/uri-list`. rind picks
+   one from `XDG_CURRENT_DESKTOP`; override it with `[drag] clipboard_format = "gnome"` or
+   `"uri-list"`. Only one format can be offered at a time.
+2. **Drag window** (`Alt+D`): opens a small window with the files that you drag from, using
+   `ripdrag` if installed, else `dragon-drop`, `xdragon` or `dragon`. It closes after the drop
+   (`--and-exit`); several files are dragged together (`--all`). Choose another tool or flags with
+   `[drag] helper` and `helper_args`.
+3. **File manager** (`Alt+F`): opens the current folder in your file manager. When something is
+   selected, rind first asks the file manager to highlight it (the `FileManager1` D-Bus service that
+   GNOME Files and Dolphin provide), then falls back to just opening the folder. Use `[drag]
+   file_manager = "nautilus {}"` for a specific program, or `reveal_selection = false` to never
+   highlight.
+
+Inside an archive, extract first (`e`). See section 6 for the `[drag]` settings.
 
 ### Properties and permissions
 
@@ -419,8 +516,11 @@ permissions with the nine read/write/execute boxes (the octal mode updates as yo
 *Apply*. For a folder, *Apply to everything inside* applies the mode to its contents too:
 subfolders get the same mode and files get it without execute bits, except files that were
 already executable keep theirs. Special bits (setuid, setgid, sticky) are left as they were.
-Only the owner (or root) can change permissions; ownership can't be changed. A permission
-change is one undo step, and a failure part-way is rolled back.
+The **Ownership** row shows the owner and group. You can move a file to another **group you
+belong to** with the group list; changing the **owner** needs root (the field is greyed out
+otherwise, and an unknown user name is refused). *Apply to everything inside* covers ownership
+too. Only the owner (or root) can change permissions or the group. Permissions and ownership
+together are one undo/redo step, and a failure part-way is rolled back.
 
 ### Open with
 
@@ -430,6 +530,14 @@ then the rest by name, then *Default application*. You can also type a command (
 file). Tick *Always use this for .ext files* to remember the choice (stored in
 `~/.local/state/rind/openwith.json`, not in your config). Terminal applications run in rind's
 terminal and return when they exit.
+
+If a file doesn't open, rind now tells you why: it waits a moment, and if the program exits with
+an error, the notification shows its exit code and message (for example `xdg-open exited with 3`
+means the system has no program for that file type). If several ways exist (`xdg-open`,
+`gio open`, `kde-open`, `exo-open`), the next one is tried before giving up. `rind --doctor` prints
+what rind found: which openers, the clipboard tool, drag helpers, and whether it is running inside
+a Flatpak/Toolbox/Distrobox container (where it reaches the host's tools through `flatpak-spawn
+--host` or `distrobox-host-exec` when the container has none).
 
 ### Devices
 
@@ -596,7 +704,42 @@ py   = { cmd = "nvim {}", terminal = true }
 
 # {} marks where the file goes; without it the path is added as the last argument.
 mkv = "mpv --fs {}"
+
+[keys]       # section 6.1: change any shortcut; `rind --keys` lists the action names
+cut_files    = "ctrl+x"            # replaces the defaults for that action ("x" and "ctrl+x")
+copy_files   = ["c", "ctrl+c"]     # several keys
+delete_items = ["delete"]
+quit         = ""                  # empty turns a shortcut off
+drag_out     = "g"
+
+[drop]       # files dropped onto the terminal
+action = "ask"                     # ask | copy | move
+
+[drag]       # getting files out
+clipboard_format = "auto"          # auto | gnome | uri-list
+# helper       = "ripdrag"         # default: first of ripdrag, dragon-drop, xdragon, dragon
+# helper_args  = "--and-exit --all"
+# file_manager = "nautilus {}"     # default: the system's (xdg-open)
+reveal_selection = true            # highlight the selection when opening the file manager
 ```
+
+### 6.1 Changing keyboard shortcuts
+
+Every action has an id (its name in `rind --keys`). Under `[keys]`, give an id a key, a list of keys,
+or `""` to switch it off. The configured keys **replace** the defaults for that action, and a key
+you assign is taken away from whatever used it before. Key names are Textual's: letters (`"x"`;
+a capital such as `"Z"` or `"shift+z"` means Shift), `ctrl+x`, `alt+left`, `f2`, `enter`, `escape`,
+`space`, `backspace`, `delete`, `pageup`, `pagedown`, `tab`; punctuation may be written as itself
+(`"/"`, `":"`, `"."`). Menus, the Help screen and the context menus show your keys.
+
+```sh
+rind --keys          # every action with its keys; changed ones are marked *
+```
+
+Unknown action names are reported at start-up and ignored. The path bar, menus and dialogs keep
+their fixed keys; `Ctrl+L` (`focus_path`) and `F10` (`menu_bar`) can be changed too. Some terminals
+can't tell certain combinations apart (`Ctrl+I` is `Tab`, `Ctrl+M` is `Enter`, `Ctrl+Shift+letter`
+is `Ctrl+letter`), so pick keys your terminal reports.
 
 ### Reference
 
@@ -629,7 +772,7 @@ the app.
 1. The extension's entry in `[open]`, if any.
 2. Otherwise an application you chose with *Open with… → Always use this*.
 3. Otherwise `open.default`, if set.
-4. Otherwise the system default: `xdg-open`, then `gio open`.
+4. Otherwise the system default: `xdg-open`, then `gio open` (then `kde-open`, `exo-open`).
 
 Archives open inside rind unless step 1 names a tool. Files without an extension use steps 3
 and 4. Folders always open inside rind.
@@ -654,7 +797,13 @@ rind never modifies your config.
 |---|---|
 | Clicks do nothing | Mouse reporting is off in your terminal or tmux (`set -g mouse on`). |
 | Right-click opens the terminal's menu | Use `m`, or enable sending right-clicks to applications in the terminal. |
-| "No opener found" | Install `xdg-utils`, or set `open.default`. |
+| "No opener found" | Install `xdg-utils`, or set `open.default`. Run `rind --doctor` to see what rind found. |
+| "Could not open …: xdg-open exited with N" | The message after it is the program's own error. `3` usually means no tool or no handler for that type: install `xdg-utils`/`gvfs`, or set an application with *Open with…* or `[open]`. |
+| Dropping files onto the terminal does nothing | The terminal must paste the path when you drop (most do). If the path bar has focus the text goes there; click the file list first. |
+| Alt+C says it needs wl-clipboard or xclip | Install `wl-clipboard` (Wayland) or `xclip` (X11). |
+| Ctrl+V in my file manager doesn't paste the files | Try the other format: `[drag] clipboard_format = "gnome"` or `"uri-list"`. |
+| Alt+D says no drag helper | Install `ripdrag` (e.g. `cargo install ripdrag`) or `dragon`, or set `[drag] helper`. |
+| A `[keys]` change has no effect | Run `rind --keys`: a typo in the action name is reported at start-up, and the key must be one your terminal sends. |
 | A file doesn't open in my tool | Check the command runs from a shell; use `terminal = true` for terminal programs; on immutable distros run rind on the host. |
 | "Config error: ..." | Fix the TOML shown. Keys with commas or dots must be quoted, as `"md,txt"`. |
 | No image preview | `pip install pillow` into rind's environment, or reinstall with `[images]`; use a true-colour terminal. |
@@ -678,8 +827,8 @@ rind never modifies your config.
 
 ## 8. Known limitations
 
-- One folder per tab: no side-by-side (dual pane) view. Use two tabs with `y`/`Y`, or drag onto a tab.
-- No redo, no changing file ownership, and no dragging files to or from other applications.
+- No dragging files to or from other applications (terminals can't), and no more than two panes.
+- Split view is most comfortable on a wide terminal (it was tested at 170 columns). On narrower ones, hide columns from the View menu and keep the preview pane off to give the panes room.
 - Mounting and unmounting needs `udisks2` (or `gio`); this was tested with stand-ins for those tools, not real hardware.
 - Archives are read-only; rind can't add to or edit one in place (compress creates a new archive). Browsing unpacks the whole archive first, so very large ones take a moment.
 - The Trash view shows the home trash only; items trashed on other drives can still be
@@ -692,7 +841,7 @@ rind never modifies your config.
 ## 9. Development
 
 ```sh
-git clone <your repo> && cd rind
+git clone https://github.com/elvishcraftsman/rind && cd rind
 python3 -m venv .venv && .venv/bin/pip install -e '.[images]'
 .venv/bin/python tests/test_fileops.py      # engine: trash, copy/move, conflicts, cancel
 .venv/bin/python tests/test_app.py          # end-to-end UI test with a headless Textual pilot
@@ -703,6 +852,9 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[images]'
 .venv/bin/python tests/test_app3.py         # menu bar, archives, breadcrumbs, history, new file
 .venv/bin/python tests/test_engines3.py     # open-with, devices, chmod
 .venv/bin/python tests/test_app4.py         # tabs, drag and drop, devices, properties, open with
+.venv/bin/python tests/test_app5.py         # redo, ownership
+.venv/bin/python tests/test_v08.py          # drop-in paste, drag-out helpers, [keys], opener errors, updater
+.venv/bin/python tests/test_app6.py         # split view
 ```
 
 Layout: `rind/app.py` (UI), `screens.py` (dialogs, menus, search, jump), `fileops.py`

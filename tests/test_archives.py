@@ -2,7 +2,7 @@ import io, os, stat, sys, tarfile, tempfile, zipfile
 from pathlib import Path
 home = Path(tempfile.mkdtemp())
 for k in ("HOME","XDG_DATA_HOME","XDG_STATE_HOME","XDG_CONFIG_HOME","XDG_CACHE_HOME"): os.environ[k] = str(home)
-sys.path.insert(0, "/home/claude/rind")
+sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), ".."))
 from rind import archives as A
 from rind.fileops import Job, Cancelled
 

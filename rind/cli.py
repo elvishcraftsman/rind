@@ -71,6 +71,23 @@ def run_update(source: str, check_only: bool, yes: bool) -> int:
     return 0
 
 
+def print_keys(cfg: dict) -> None:
+    from . import keys
+    from .app import FileTable, RindApp
+
+    infos = list(FileTable.BINDINGS) + list(RindApp.BINDINGS)
+    raw = cfg.get("keys", {}) if isinstance(cfg.get("keys"), dict) else {}
+    overrides, errors = keys.configure(raw, {b.id for b in infos})
+    for e in errors:
+        print(f"rind: {e}", file=sys.stderr)
+    print(f"{'ACTION':<24}{'KEYS':<28}DESCRIPTION")
+    for ident, (desc, ks) in keys.effective(infos, overrides).items():
+        mark = "*" if ident in overrides else " "
+        print(f"{ident:<23}{mark}{', '.join(ks) or '(off)':<28}{desc}")
+    if overrides:
+        print("\n* changed in [keys] of your config.toml")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="rind", description="A mouse-friendly terminal file manager.")
     ap.add_argument("folder", nargs="?", help="folder to open (default: current folder)")
@@ -83,6 +100,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--check", action="store_true", help="with --update: only check, don't install")
     ap.add_argument("-y", "--yes", action="store_true", help="with --update: don't ask for confirmation")
     ap.add_argument("--update-source", metavar="SRC", help="override the update source for this run")
+    ap.add_argument("--keys", action="store_true",
+                    help="list every shortcut with its action name (for [keys] in config.toml)")
+    ap.add_argument("--doctor", action="store_true",
+                    help="show what rind found for opening files, the clipboard and drag helpers")
     args = ap.parse_args(argv)
 
     if args.init:
@@ -91,9 +112,17 @@ def main(argv: list[str] | None = None) -> None:
 
     from . import config, updater
 
+    if args.doctor:
+        from . import launcher
+        print("\n".join(launcher.diagnose()))
+        return
+
     cfg, cfg_error = config.load_config()
+    if args.keys:
+        print_keys(cfg)
+        return
     ucfg = cfg.get("update", {}) if isinstance(cfg.get("update"), dict) else {}
-    source = args.update_source or str(ucfg.get("source") or "") or updater.DEFAULT_SOURCE
+    source = updater.normalize_source(args.update_source or str(ucfg.get("source") or "") or updater.DEFAULT_SOURCE)
 
     if args.update or args.check:
         sys.exit(run_update(source, args.check or False, args.yes))

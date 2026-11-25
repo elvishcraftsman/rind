@@ -3,7 +3,7 @@ from pathlib import Path
 home = Path(tempfile.mkdtemp())
 for k in ("HOME","XDG_STATE_HOME","XDG_CONFIG_HOME"): os.environ[k] = str(home)
 dd = home / "share"; os.environ["XDG_DATA_HOME"] = str(dd); os.environ["XDG_DATA_DIRS"] = str(home / "share2")
-sys.path.insert(0, "/home/claude/rind")
+sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), ".."))
 from rind import openwith as O, devices as D, fileops as F
 
 # ---------------- open with
@@ -88,3 +88,33 @@ except OSError: pass
 os.chmod = real
 assert m(t) == 0o755 and m(t / "a.txt") == 0o600 and m(t / "sub") == 0o755, "rollback failed"
 print("chmod ok")
+
+# ---------------- chown
+import grp as _grp
+tt = home / "own"; (tt / "d").mkdir(parents=True); (tt / "f").write_text("x"); (tt / "d" / "g").write_text("y"); (tt / "ln").symlink_to("f")
+calls = []
+real_l = os.lchown
+def rec_lchown(p, u, g, *a, **k): calls.append((Path(p).name, u, g)); return real_l(p, u, g, *a, **k)
+os.lchown = rec_lchown
+me, mygid = os.getuid(), os.getgid()
+assert F.apply_owner(tt / "f", -1, mygid) == [] and calls == []                     # nothing to change -> no calls
+fake_gid = mygid + 12345
+def pretend(p, u, g, *a, **k):
+    calls.append((Path(p).name, u, g))
+    if g == fake_gid: return                       # pretend the change worked (we can't really chown in a sandbox)
+    return real_l(p, u, g, *a, **k)
+os.lchown = pretend
+ch = F.apply_owner(tt, -1, fake_gid, recursive=True)
+assert sorted(n for n, u, g in calls if g == fake_gid) == ["d", "f", "g", "ln", "own"], calls
+assert {(p.name, ou, og) for p, ou, og in ch} == {(n, me, mygid) for n in ("d", "f", "g", "ln", "own")}, ch
+calls.clear(); n = [0]
+def flaky_chown(p, u, g, *a, **k):
+    n[0] += 1
+    if n[0] == 3: raise PermissionError(1, "denied")
+    calls.append((Path(p).name, u, g))
+os.lchown = flaky_chown
+try: F.apply_owner(tt, -1, fake_gid, recursive=True); raise SystemExit("expected failure")
+except OSError: pass
+assert calls == [("g", me, fake_gid), ("ln", me, fake_gid), ("ln", me, mygid), ("g", me, mygid)], calls   # two applied, then undone in reverse
+os.lchown = real_l
+print("chown ok")

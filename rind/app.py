@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -25,7 +25,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.widgets import Button, DataTable, Input, Label, ListItem, ListView, Static
 
-from . import __version__, archives, config, devices, fileops, gitstatus, openwith, places, updater
+from . import (__version__, archives, config, devices, dragout, fileops, gitstatus, keys, launcher,
+               openwith, places, updater)
 from .fileops import Cancelled, Job, Resolver, human, natural_key
 from .preview import build_preview
 from .screens import (ConfirmScreen, ConflictScreen, InfoScreen, JumpScreen, MenuScreen, OpenWithScreen,
@@ -39,6 +40,21 @@ COLUMNS = (("size", "Size"), ("modified", "Modified"), ("type", "Type"),
 
 
 MENUS = ("File", "Edit", "View", "Go", "Tools", "Help")
+# menu choice -> binding id, so menus show the keys the user has configured
+MENU_KEY_IDS = {"mkdir": "new_folder", "newfile": "new_file", "open": "open_cursor", "openwith": "open_with",
+                "newtab": "new_tab", "closetab": "close_current_tab", "shell": "shell_here",
+                "extract": "extract", "compress": "compress", "calcsize": "calc_sizes",
+                "props": "properties", "unmount": "unmount", "quit": "quit", "quitnocd": "quit_no_cd",
+                "undo": "undo", "redo": "redo", "cut": "cut_files", "copy": "copy_files",
+                "paste": "paste_files", "duplicate": "duplicate", "copytab": "copy_to_tab",
+                "movetab": "move_to_tab", "restore": "restore_items", "delete": "delete_items",
+                "rename": "rename_item", "editorrename": "rename_in_editor", "selectall": "select_all",
+                "clearmarks": "clear_marks", "split": "toggle_split", "preview": "toggle_preview",
+                "hidden": "toggle_hidden", "sortmenu": "sort_menu", "filter": "open_filter",
+                "reload": "reload_dir", "back": "go_back", "forward": "go_forward", "up": "go_up",
+                "nexttab": "next_tab", "prevtab": "prev_tab", "jump": "jump", "find": "find",
+                "gopath": "focus_path", "runcmd": "run_command", "update": "check_updates",
+                "dragout": "drag_out", "showfm": "show_in_file_manager"}
 KEY_NAMES = {"full_stop": ".", "slash": "/", "colon": ":", "backspace": "Backspace", "delete": "Delete",
              "enter": "Enter", "space": "Space", "escape": "Esc", "menu": "Menu"}
 
@@ -119,6 +135,8 @@ class TabState:
     marked: set
     filter_text: str = ""
     cursor: Optional[str] = None
+    entries: list = field(default_factory=list)  # what this tab's pane shows while it is the inactive pane
+    poll_sig: Optional[int] = None
 
 
 @dataclass
@@ -131,6 +149,7 @@ class DragState:
 class UndoEntry:
     label: str
     run: Callable[[], None]
+    redo: Optional[Callable[[], None]] = None
 
 
 # ---------------------------------------------------------------- widgets
@@ -147,7 +166,7 @@ class PathInput(Input):
 
     def action_reset(self) -> None:
         self.value = self.app.display_path(self.app.cwd)  # type: ignore[attr-defined]
-        self.app.query_one(FileTable).focus()
+        self.app.table.focus()
 
     def action_complete(self) -> None:
         self.app.complete_path(self)  # type: ignore[attr-defined]
@@ -191,7 +210,7 @@ class DeviceItem(PlaceItem):
 
 
 class FileTable(DataTable):
-    BINDINGS = [
+    BINDINGS = keys.with_ids([
         Binding("enter", "app.open_cursor", "Open", show=False),
         Binding("backspace,alt+up", "app.go_up", "Up", show=False),
         Binding("alt+left", "app.go_back", "Back", show=False),
@@ -202,6 +221,7 @@ class FileTable(DataTable):
         Binding("delete,d", "app.delete_items", "Delete", show=False),
         Binding("n,ctrl+n", "app.new_folder", "New folder", show=False),
         Binding("z,ctrl+z", "app.undo", "Undo", show=False),
+        Binding("Z,ctrl+y", "app.redo", "Redo", show=False),
         Binding("R", "app.restore_items", "Restore", show=False),
         Binding("j", "app.jump", "Jump", show=False),
         Binding("colon", "app.run_command", "Run command", show=False),
@@ -234,13 +254,35 @@ class FileTable(DataTable):
         Binding("u", "app.check_updates", "Update", show=False),
         Binding("f5", "app.reload_dir", "Reload", show=False),
         Binding("escape", "app.clear_marks", "Clear", show=False),
+        Binding("f4", "app.toggle_split", "Split view (two panes)", show=False),
+        Binding("tab", "app.switch_pane", "Switch pane (split view)", show=False),
         Binding("q", "app.quit", "Quit", show=False),
         Binding("Q", "app.quit_no_cd", "Quit without cd", show=False),
-    ]
+        Binding("g", "app.drag_out", "Drag out (menu)", show=False),
+        Binding("alt+c", "app.copy_to_system", "Copy files to the system clipboard", show=False),
+        Binding("alt+d", "app.drag_helper", "Drag window (ripdrag/dragon)", show=False),
+        Binding("alt+f", "app.show_in_file_manager", "Show in file manager", show=False),
+    ])
+
+    key_overrides: dict = {}  # set from [keys] in config.toml before the tables are created
 
     _drag: Optional[tuple] = None  # (row, x, y) of a left-button press that may become a drag
 
+    def __init__(self, side: int = 0, **kw) -> None:
+        super().__init__(**kw)
+        keys.apply(self._bindings, FileTable.key_overrides)
+        self.side = side  # 0 = left pane, 1 = right pane
+
+    def on_paste(self, event: events.Paste) -> None:
+        # Files dropped onto the terminal arrive as pasted text (their paths).
+        event.stop()
+        self.app.handle_drop(event.text)  # type: ignore[attr-defined]
+
+    def on_focus(self, event: events.Focus) -> None:
+        self.app.ensure_side(self.side)  # type: ignore[attr-defined]
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
+        self.app.ensure_side(self.side)  # type: ignore[attr-defined]
         self._drag = None
         if event.button != 1 or event.ctrl or event.shift:
             return
@@ -275,6 +317,7 @@ class FileTable(DataTable):
         except Exception:  # noqa: BLE001
             row = None
         app = self.app
+        app.ensure_side(self.side)  # type: ignore[attr-defined]
         if event.button == 3:
             event.prevent_default()
             app.right_click(row, event.screen_x, event.screen_y)  # type: ignore[attr-defined]
@@ -295,12 +338,14 @@ class FileTable(DataTable):
 
 class RindApp(App):
     TITLE = "rind"
-    BINDINGS = [Binding("ctrl+l", "focus_path", "Edit path", show=False),
-                Binding("f10,f9,alt+m", "menu_bar", "Menu bar", show=False)]
+    BINDINGS = keys.with_ids([Binding("ctrl+l", "focus_path", "Edit path", show=False),
+                              Binding("f10,f9,alt+m", "menu_bar", "Menu bar", show=False)])
     CSS = """
     #menubar { height: 1; background: $panel; }
     .menulabel { width: auto; height: 1; }
     .menulabel:hover { background: $primary; color: $text; }
+    #panes { height: 1fr; }
+    #table-r { display: none; border-left: solid $primary-background; }
     #tabbar { height: 1; display: none; background: $panel; padding: 0 1; }
     #owlist { height: auto; max-height: 12; margin-top: 1; }
     #owcmd { margin-top: 1; }
@@ -349,6 +394,8 @@ class RindApp(App):
         self.marked: set[Path] = set()
         self.clip: Optional[tuple[str, list[Path]]] = None
         self.undo_stack: list[UndoEntry] = []
+        self.redo_stack: list[UndoEntry] = []
+        self._redo_pending: Optional[tuple[list, float]] = None
         self.skip_cwd = False
         self.filter_text = ""
         self.in_trash = False
@@ -382,6 +429,14 @@ class RindApp(App):
         except (TypeError, ValueError):
             self.update_interval = 24.0
 
+        known = {b.id for b in FileTable.BINDINGS} | {b.id for b in RindApp.BINDINGS}
+        overrides, self.key_errors = keys.configure(section("keys"), known)
+        FileTable.key_overrides = overrides
+        keys.apply(self._bindings, overrides)
+        self.key_info = keys.effective(list(FileTable.BINDINGS) + list(RindApp.BINDINGS), overrides)
+        self.drag_cfg = section("drag")
+        self.drop_action = str(section("drop").get("action", "ask")).lower()
+
         open_cfg = section("open")
         self.default_opener = open_cfg.get("default")
         self.openers: dict[str, object] = {}
@@ -413,6 +468,9 @@ class RindApp(App):
         self.last_cmd = ""
         self.archive_ctxs: list[ArchiveCtx] = []
         self.tabs: list[TabState] = []
+        self.split = False
+        self.active_side = 0
+        self.pane_tabs: list[TabState] = []
         self.tab_index = 0
         self.drag_state: Optional[DragState] = None
         self.devices: list[devices.Device] = []
@@ -450,7 +508,9 @@ class RindApp(App):
             yield ListView(*self.sidebar_items(), initial_index=1, id="sidebar")
             with Vertical(id="main"):
                 yield FilterInput(id="filter", placeholder="Filter this folder…  (Esc clears)")
-                yield FileTable(cursor_type="row", zebra_stripes=True)
+                with Horizontal(id="panes"):
+                    yield FileTable(0, cursor_type="row", zebra_stripes=True, id="table-l")
+                    yield FileTable(1, cursor_type="row", zebra_stripes=True, id="table-r")
             with VerticalScroll(id="preview"):
                 yield Static("", id="preview-body")
         yield Static("", id="status")
@@ -479,11 +539,13 @@ class RindApp(App):
         self.watcher.start(asyncio.get_running_loop())
         self.set_interval(2.0, self._poll)
         self.navigate(self.start, push=False)
-        self.query_one(FileTable).focus()
+        self.table.focus()
         if self.start_preview:
             self.action_toggle_preview()
         if self.config_error:
             self.notify(self.config_error, severity="warning")
+        if self.key_errors:
+            self.notify("\n".join(self.key_errors), severity="warning", timeout=10)
         if self.update_source and self.update_check and updater.due(self.update_interval):
             self._check_updates(manual=False)
 
@@ -522,7 +584,7 @@ class RindApp(App):
         self.git = None
         self.refresh_listing(select_name=select, top=select is None)
         self.schedule_git()
-        self.query_one(FileTable).focus()
+        self.table.focus()
 
     def record_visit(self, p: Path) -> None:
         places.record(self.visits, p)
@@ -542,17 +604,26 @@ class RindApp(App):
             primary = 0
         return (primary, natural_key(name))
 
-    def refresh_listing(self, select_name: Optional[str] = None, top: bool = False) -> None:
-        table = self.query_one(FileTable)
+    @property
+    def table(self) -> "FileTable":
+        """The file list of the active pane."""
+        return self.query_one("#table-r" if (self.split and self.active_side == 1) else "#table-l", FileTable)
+
+    def table_for(self, side: int) -> "FileTable":
+        return self.query_one("#table-r" if side else "#table-l", FileTable)
+
+    def render_listing(self, table, cwd: Path, marked: set, filter_text: str, git, prev_entries: list,
+                       select_name: Optional[str] = None, top: bool = False) -> list:
+        """Fill `table` with the contents of cwd; returns its entries [(path, is_dir)]."""
         prev = table.cursor_row
-        prev_name = self.entries[prev][0].name if 0 <= prev < len(self.entries) else None
+        prev_name = prev_entries[prev][0].name if 0 <= prev < len(prev_entries) else None
         rows = []
         try:
-            with os.scandir(self.cwd) as it:
+            with os.scandir(cwd) as it:
                 for e in it:
                     if not self.show_hidden and e.name.startswith("."):
                         continue
-                    if self.filter_text and not match_name(self.filter_text, e.name):
+                    if filter_text and not match_name(filter_text, e.name):
                         continue
                     try:
                         is_dir = e.is_dir()
@@ -571,11 +642,10 @@ class RindApp(App):
             rows = dirs + files
         else:
             rows.sort(key=self.sort_key, reverse=self.sort_reverse)
-        self.entries = [(r[1], r[2]) for r in rows]
+        entries = [(r[1], r[2]) for r in rows]
 
         arrow = " ▼" if self.sort_reverse else " ▲"
-        real_dir = os.path.realpath(self.cwd)
-        git = self.git if (self.show_git and self.git is not None) else None
+        real_dir = os.path.realpath(cwd)
         table.clear(columns=True)
         table.add_column("Name" + (arrow if self.sort_by == "name" else ""), key="name")
         if git:
@@ -584,9 +654,9 @@ class RindApp(App):
             label = dict(COLUMNS)[key]
             table.add_column(label + (arrow if key == self.sort_by else ""), key=key)
         for name, path, is_dir, is_link, st in rows:
-            marked = path in self.marked
-            style = "bold yellow" if marked else ("bold blue" if is_dir else ("cyan" if is_link else ""))
-            label = Text(("● " if marked else "  ") + name + ("/" if is_dir else ""), style=style)
+            is_marked = path in marked
+            style = "bold yellow" if is_marked else ("bold blue" if is_dir else ("cyan" if is_link else ""))
+            label = Text(("● " if is_marked else "  ") + name + ("/" if is_dir else ""), style=style)
             if is_link:
                 try:
                     label.append("  → " + os.readlink(path), style="dim")
@@ -603,14 +673,95 @@ class RindApp(App):
             idx = 0 if top else min(prev, len(rows) - 1)
             target = select_name or (None if top else prev_name)
             if target:
-                idx = next((i for i, (p, _) in enumerate(self.entries) if p.name == target), idx)
+                idx = next((i for i, (p, _) in enumerate(entries) if p.name == target), idx)
             table.move_cursor(row=idx, animate=False)
+        return entries
+
+    def refresh_listing(self, select_name: Optional[str] = None, top: bool = False) -> None:
+        git = self.git if (self.show_git and self.git is not None) else None
+        self.entries = self.render_listing(self.table, self.cwd, self.marked, self.filter_text, git,
+                                           self.entries, select_name, top)
         try:
             self._poll_sig = os.stat(self.cwd).st_mtime_ns
         except OSError:
             self._poll_sig = None
         self.update_status()
         self.schedule_preview()
+        self.refresh_other_pane()
+
+    # ----- split view (two panes)
+    def refresh_other_pane(self) -> None:
+        if not self.split:
+            return
+        ts = self.pane_tabs[1 - self.active_side]
+        cwd = ts.cwd
+        while not cwd.is_dir() and cwd != cwd.parent:
+            cwd = cwd.parent
+        ts.cwd = cwd
+        ts.entries = self.render_listing(self.table_for(1 - self.active_side), cwd, ts.marked, ts.filter_text,
+                                         None, ts.entries, select_name=ts.cursor)
+        try:
+            ts.poll_sig = os.stat(cwd).st_mtime_ns
+        except OSError:
+            ts.poll_sig = None
+
+    def ensure_side(self, side: int) -> None:
+        """Called by a file list that was focused or clicked: make its pane the active one."""
+        if self.split and side != self.active_side:
+            self.activate_side(side)
+
+    def activate_side(self, side: int) -> None:
+        if not self.split or side == self.active_side:
+            return
+        self._save_tab()
+        self._activate_tab(self.tabs.index(self.pane_tabs[side]))
+
+    def _fix_panes(self) -> None:
+        """After tabs were closed: keep both panes pointing at live, distinct tabs."""
+        if not self.split:
+            return
+        active = self.tabs[self.tab_index]
+        other_i = 1 - self.active_side
+        self.pane_tabs[self.active_side] = active
+        other = self.pane_tabs[other_i]
+        if other not in self.tabs or other is active:
+            cands = [t for t in self.tabs if t is not active]
+            if not cands:
+                self._set_split(False)
+                return
+            self.pane_tabs[other_i] = cands[0]
+
+    def _set_split(self, on: bool) -> None:
+        if on == self.split:
+            return
+        if on:
+            self._save_tab()
+            active = self.tabs[self.tab_index]
+            if len(self.tabs) > 1:
+                other = self.tabs[(self.tab_index + 1) % len(self.tabs)]
+            else:
+                other = TabState(self.cwd, [], [], set(), "", None)
+                self.tabs.append(other)
+            self.split, self.active_side, self.pane_tabs = True, 0, [active, other]
+            self.query_one("#table-r").display = True
+        else:
+            self.split, self.active_side = False, 0
+            self.query_one("#table-r").display = False
+        self.update_tabs()
+        self.refresh_listing()
+        self.table.focus()
+
+    def action_toggle_split(self) -> None:
+        self._set_split(not self.split)
+
+    def action_switch_pane(self) -> None:
+        if self.split:
+            self.table_for(1 - self.active_side).focus()
+
+    def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
+        if action == "switch_pane":
+            return self.split  # outside split view Tab keeps its normal focus-moving job
+        return True
 
     def update_status(self) -> None:
         parts = [f"{len(self.entries)} items"]
@@ -632,6 +783,8 @@ class RindApp(App):
             parts.append(f"git: {self.git.branch}" + (f" ({n} changed)" if n else ""))
         if self.undo_stack:
             parts.append("z undoes: " + self.undo_stack[-1].label)
+        if self.redo_stack:
+            parts.append("Z redoes: " + self.redo_stack[-1].label)
         self.query_one("#status", Static).update(Text("  ·  ".join(parts)))
 
     # ----- automatic refresh
@@ -658,7 +811,16 @@ class RindApp(App):
         self.schedule_git()
 
     def _poll(self) -> None:
-        """Fallback when inotify is unavailable: notice folder-level changes."""
+        """Notice folder-level changes: the active folder when inotify can't watch it, and always
+        the other pane's folder (only the active one is watched)."""
+        if self.split:
+            ts = self.pane_tabs[1 - self.active_side]
+            try:
+                sig = os.stat(ts.cwd).st_mtime_ns
+            except OSError:
+                sig = None
+            if sig != ts.poll_sig:
+                self.refresh_other_pane()
         if self.watcher.active:
             return
         try:
@@ -683,10 +845,10 @@ class RindApp(App):
     def action_close_filter(self) -> None:
         self._reset_filter()
         self.refresh_listing(top=True)
-        self.query_one(FileTable).focus()
+        self.table.focus()
 
     def action_focus_table(self) -> None:
-        self.query_one(FileTable).focus()
+        self.table.focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "filter" and event.value != self.filter_text:
@@ -721,7 +883,7 @@ class RindApp(App):
 
     def update_preview_now(self) -> None:
         self._pv_timer = None
-        row = self.query_one(FileTable).cursor_row
+        row = self.table.cursor_row
         body = self.query_one("#preview-body", Static)
         if not (0 <= row < len(self.entries)):
             body.update("")
@@ -750,13 +912,14 @@ class RindApp(App):
             self.query_one("#preview").scroll_home(animate=False)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self.schedule_preview()
+        if event.data_table is self.table:
+            self.schedule_preview()
 
     # ----- selection
     def targets(self) -> list[Path]:
         if self.marked:
             return sorted((p for p in self.marked if os.path.lexists(p)), key=lambda p: natural_key(p.name))
-        row = self.query_one(FileTable).cursor_row
+        row = self.table.cursor_row
         return [self.entries[row][0]] if 0 <= row < len(self.entries) else []
 
     def toggle_mark_row(self, row: int) -> None:
@@ -771,7 +934,7 @@ class RindApp(App):
         self.refresh_listing()
 
     def action_toggle_mark(self) -> None:
-        table = self.query_one(FileTable)
+        table = self.table
         self.toggle_mark_row(table.cursor_row)
         table.action_cursor_down()
 
@@ -796,7 +959,7 @@ class RindApp(App):
             self.navigate(path) if is_dir else self.open_file(path)
 
     def action_open_cursor(self) -> None:
-        self.open_row(self.query_one(FileTable).cursor_row)
+        self.open_row(self.table.cursor_row)
 
     def open_file(self, path: Path) -> None:
         ext = path.suffix.lower().lstrip(".")
@@ -815,31 +978,42 @@ class RindApp(App):
                 spec = self.default_opener
         if cmd is None:
             if spec is None:
-                for base in (["xdg-open"], ["gio", "open"], ["open"]):
-                    if shutil.which(base[0]):
-                        cmd = base + [str(path)]
-                        break
-                if cmd is None:
-                    self.notify("No opener found. Install xdg-utils or set [open] in config.", severity="error")
-                    return
+                self._start(launcher.system_open_candidates(path), path.name)
+                return
             else:
                 built = build_command(spec, path)
                 if not built:
                     self.notify(f"Bad opener config for .{path.suffix.lstrip('.')}", severity="error")
                     return
                 cmd, terminal = built
-        self._launch(cmd, terminal)
+        self._launch(cmd, terminal, path.name)
 
-    def _launch(self, cmd: list, terminal: bool) -> None:
-        try:
-            if terminal:
+    def _launch(self, cmd: list, terminal: bool, label: str = "") -> None:
+        if terminal:
+            try:
                 with self.suspend():
                     subprocess.run(cmd)
-            else:
-                subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-        except OSError as e:
-            self.notify(f"Could not run {cmd[0]}: {e.strerror}", severity="error")
+            except OSError as e:
+                self.notify(f"Could not run {cmd[0]}: {e.strerror}", severity="error")
+            return
+        self._start([launcher.wrap(cmd)], label or Path(cmd[-1]).name)
+
+    def _start(self, candidates: list, what: str) -> None:
+        """Run the first working command in the background and say so if none of them worked."""
+        if not candidates:
+            self.notify("No opener found. Install xdg-utils, or set [open] in config.toml.", severity="error")
+            return
+        self.notify(f"Opening {what}…", timeout=2)
+
+        def done(ok: bool, msg: str) -> None:
+            if ok:
+                return
+            try:
+                self.call_from_thread(self.notify, f"Could not open {what}: {msg}", severity="error", timeout=12)
+            except Exception:  # noqa: BLE001
+                pass
+
+        launcher.launch(candidates, done)
 
     # ----- navigation actions
     def action_go_up(self) -> None:
@@ -936,7 +1110,7 @@ class RindApp(App):
 
     # ----- context menus
     def right_click(self, row: Optional[int], x: int, y: int) -> None:
-        table = self.query_one(FileTable)
+        table = self.table
         if row is not None and 0 <= row < len(self.entries):
             table.move_cursor(row=row, animate=False)
             if self.entries[row][0] not in self.marked and self.marked:
@@ -947,7 +1121,7 @@ class RindApp(App):
             self.show_context_menu(x, y, False)
 
     def action_key_context_menu(self) -> None:
-        table = self.query_one(FileTable)
+        table = self.table
         r = table.region
         y = max(r.y + 1, r.y + 2 + table.cursor_row - int(table.scroll_y))
         self.show_context_menu(r.x + 4, y, bool(self.entries))
@@ -968,6 +1142,7 @@ class RindApp(App):
                 items += [("rename", "Rename…" if n == 1 else "Rename marked… (pattern)"),
                           ("editorrename", "Rename in editor…"), ("duplicate", "Duplicate"),
                           ("delete", "Move to trash…"), ("copypath", "Copy path"),
+                          ("dragout", "Drag out  ▸"),
                           ("compress", "Compress…"), ("calcsize", "Calculate size")]
                 if any(archives.archive_kind(p) for p in self.targets()):
                     items.append(("extract", "Extract here"))
@@ -975,7 +1150,7 @@ class RindApp(App):
                     items.append(("opentab", "Open in new tab"))
                 items += [("props", "Properties…"), None]
         else:
-            items += [paste, None]
+            items += [paste, ("showfm", "Open folder in file manager"), None]
         if self.in_trash:
             items += [("emptytrash", "Empty trash…")]
         else:
@@ -1011,6 +1186,8 @@ class RindApp(App):
             self.show_sort_menu(x, y)
         elif choice == "viewmenu":
             self.show_view_menu(x, y)
+        elif choice == "dragout":
+            self.show_drag_menu(x, y)
         elif choice.startswith("col:"):
             self.toggle_column(choice[4:])
             self.show_view_menu(x, y)
@@ -1026,7 +1203,7 @@ class RindApp(App):
              "paste": self.action_paste_files, "rename": self.action_rename_item,
              "delete": self.action_delete_items, "mkdir": self.action_new_folder,
              "hidden": self.action_toggle_hidden, "reload": self.action_reload_dir,
-             "undo": self.action_undo, "restore": self.action_restore_items,
+             "undo": self.action_undo, "redo": self.action_redo, "restore": self.action_restore_items,
              "emptytrash": self.action_empty_trash, "find": self.action_find,
              "filter": self.action_open_filter, "preview": self.action_toggle_preview,
              "runcmd": self.action_run_command, "shell": self.action_shell_here,
@@ -1044,7 +1221,9 @@ class RindApp(App):
              "newtab": self.action_new_tab, "closetab": self.action_close_current_tab,
              "opentab": self.action_open_in_tab, "unmount": self.action_unmount,
              "copytab": self.action_copy_to_tab, "movetab": self.action_move_to_tab,
-             "nexttab": self.action_next_tab, "prevtab": self.action_prev_tab}[choice]()
+             "nexttab": self.action_next_tab, "prevtab": self.action_prev_tab,
+             "split": self.action_toggle_split, "clipfiles": self.action_copy_to_system,
+             "dragwin": self.action_drag_helper, "showfm": self.action_show_in_file_manager}[choice]()
 
     def show_sort_menu(self, x: int, y: int) -> None:
         items: list = [(f"sort:{k}", ("● " if k == self.sort_by else "  ") + label) for k, label in SORTS]
@@ -1054,7 +1233,7 @@ class RindApp(App):
         self.push_screen(MenuScreen(items, x, y), lambda c: self.run_menu_choice(c, x, y))
 
     def action_sort_menu(self) -> None:
-        r = self.query_one(FileTable).region
+        r = self.table.region
         self.show_sort_menu(r.x + 4, r.y + 1)
 
     # ----- clipboard
@@ -1208,16 +1387,24 @@ class RindApp(App):
             self.notify(e, severity="error")
         if res.done:
             self.push_undo(f"{verb.lower()} {n} item{'s' if n != 1 else ''}",
-                           lambda: self._undo_transfer(mode, res))
+                           lambda: self._undo_transfer(mode, res),
+                           redo=lambda: self._start_transfer(mode, [src for src, _ in res.done],
+                                                             res.done[0][1].parent))
         if clear_clip and mode == "cut" and not res.cancelled and not res.errors:
             self.clip = None
         self.marked.clear()
         self.refresh_listing(select_name=res.done[-1][1].name if res.done else None)
 
     # ----- undo
-    def push_undo(self, label: str, run: Callable[[], None]) -> None:
-        self.undo_stack.append(UndoEntry(label, run))
+    def push_undo(self, label: str, run: Callable[[], None],
+                  redo: Optional[Callable[[], None]] = None) -> None:
+        self.undo_stack.append(UndoEntry(label, run, redo))
         del self.undo_stack[:-50]
+        pending, self._redo_pending = self._redo_pending, None
+        if pending is not None and time.monotonic() - pending[1] < 60:
+            self.redo_stack = pending[0]  # a redo just re-did something: keep the rest of the redo chain
+        else:
+            self.redo_stack.clear()
         self.update_status()
 
     def action_undo(self) -> None:
@@ -1227,6 +1414,20 @@ class RindApp(App):
         entry = self.undo_stack.pop()
         self.notify(f"Undoing: {entry.label}")
         entry.run()
+        if entry.redo is not None:
+            self.redo_stack.append(entry)
+        else:
+            self.redo_stack.clear()  # the chain is broken: older redos would be out of order
+        self.update_status()
+
+    def action_redo(self) -> None:
+        if not self.redo_stack:
+            self.notify("Nothing to redo", severity="warning")
+            return
+        entry = self.redo_stack.pop()
+        self.notify(f"Redoing: {entry.label}")
+        self._redo_pending = (list(self.redo_stack), time.monotonic())
+        entry.redo()  # re-does the operation, which pushes a fresh undo entry
         self.update_status()
 
     def _restore_records(self, records: list, errs: list[str]) -> None:
@@ -1291,31 +1492,50 @@ class RindApp(App):
             if "/" in new or new in (".", ".."):
                 self.notify("Invalid name", severity="error")
                 return
-            dest = old.with_name(new)
-            if os.path.lexists(dest):
-                self.notify(f"'{new}' already exists", severity="error")
-                return
-            try:
-                old.rename(dest)
-            except OSError as e:
-                self.notify(f"Rename failed: {e.strerror}", severity="error")
-                return
-
-            def undo() -> None:
-                if os.path.lexists(old) or not os.path.lexists(dest):
-                    self.notify("Can't undo rename: names changed since", severity="error")
-                else:
-                    try:
-                        os.rename(dest, old)
-                    except OSError as e:
-                        self.notify(f"Undo failed: {e.strerror}", severity="error")
-                self.refresh_listing(select_name=old.name)
-
-            self.push_undo(f"rename of '{old.name}'", undo)
-            self.marked.discard(old)
-            self.refresh_listing(select_name=new)
+            self._perform_rename(old, old.with_name(new))
 
         self.push_screen(PromptScreen(f"Rename '{old.name}' to:", old.name), done)
+
+    def _make_folder(self, target: Path) -> None:
+        try:
+            target.mkdir()
+        except OSError as e:
+            self.notify(f"Could not create folder: {e.strerror}", severity="error")
+            return
+
+        def undo() -> None:
+            try:
+                os.rmdir(target)
+            except OSError:
+                self.notify("Can't undo: the folder is no longer empty", severity="error")
+            self.refresh_listing()
+
+        self.push_undo(f"new folder '{target.name}'", undo, redo=lambda: self._make_folder(target))
+        self.refresh_listing(select_name=target.name)
+
+    def _perform_rename(self, old: Path, dest: Path) -> None:
+        if os.path.lexists(dest):
+            self.notify(f"'{dest.name}' already exists", severity="error")
+            return
+        try:
+            old.rename(dest)
+        except OSError as e:
+            self.notify(f"Rename failed: {e.strerror}", severity="error")
+            return
+
+        def undo() -> None:
+            if os.path.lexists(old) or not os.path.lexists(dest):
+                self.notify("Can't undo rename: names changed since", severity="error")
+            else:
+                try:
+                    os.rename(dest, old)
+                except OSError as e:
+                    self.notify(f"Undo failed: {e.strerror}", severity="error")
+            self.refresh_listing(select_name=old.name)
+
+        self.push_undo(f"rename of '{old.name}'", undo, redo=lambda: self._perform_rename(old, dest))
+        self.marked.discard(old)
+        self.refresh_listing(select_name=dest.name)
 
     def action_new_folder(self) -> None:
         if self._ro():
@@ -1330,22 +1550,7 @@ class RindApp(App):
             if "/" in name:
                 self.notify("Invalid name", severity="error")
                 return
-            target = self.cwd / name
-            try:
-                target.mkdir()
-            except OSError as e:
-                self.notify(f"Could not create folder: {e.strerror}", severity="error")
-                return
-
-            def undo() -> None:
-                try:
-                    os.rmdir(target)
-                except OSError:
-                    self.notify("Can't undo: the folder is no longer empty", severity="error")
-                self.refresh_listing()
-
-            self.push_undo(f"new folder '{name}'", undo)
-            self.refresh_listing(select_name=name)
+            self._make_folder(self.cwd / name)
 
         self.push_screen(PromptScreen("New folder name:"), done)
 
@@ -1376,7 +1581,8 @@ class RindApp(App):
         if records:
             n = len(records)
             label = f"'{records[0].orig.name}' moved to trash" if n == 1 else f"{n} items moved to trash"
-            self.push_undo(label, lambda: self._undo_trash(records))
+            self.push_undo(label, lambda: self._undo_trash(records),
+                           redo=lambda: self._do_trash([r.orig for r in records]))
         self.refresh_listing()
         if failed:
             names = ", ".join(p.name for p, _ in failed[:3])
@@ -1668,7 +1874,15 @@ class RindApp(App):
                 self.notify(f"Can't undo rename: {e}", severity="error")
             self.refresh_listing()
 
-        self.push_undo(f"rename of {len(changes)} item{'s' if len(changes) != 1 else ''}", undo)
+        def redo() -> None:
+            try:
+                fileops.plan_renames([(o, n.name) for o, n in changes])  # still valid?
+            except ValueError as e:
+                self.notify(f"Can't redo rename: {e}", severity="error")
+                return
+            self._do_renames(changes)
+
+        self.push_undo(f"rename of {len(changes)} item{'s' if len(changes) != 1 else ''}", undo, redo=redo)
         self.marked.clear()
         self.refresh_listing(select_name=changes[-1][1].name)
 
@@ -1884,31 +2098,33 @@ class RindApp(App):
             if "/" in name:
                 self.notify("Invalid name", severity="error")
                 return
-            target = self.cwd / name
-            try:
-                with open(target, "x"):
-                    pass
-            except FileExistsError:
-                self.notify(f"'{name}' already exists", severity="error")
-                return
-            except OSError as e:
-                self.notify(f"Could not create file: {e.strerror}", severity="error")
-                return
-
-            def undo() -> None:
-                try:
-                    if os.path.getsize(target) == 0:
-                        os.unlink(target)
-                    else:
-                        self.notify("Not undone: the new file now has content", severity="error")
-                except OSError:
-                    pass
-                self.refresh_listing()
-
-            self.push_undo(f"new file '{name}'", undo)
-            self.refresh_listing(select_name=name)
+            self._make_file(self.cwd / name)
 
         self.push_screen(PromptScreen("New file name:"), done)
+
+    def _make_file(self, target: Path) -> None:
+        try:
+            with open(target, "x"):
+                pass
+        except FileExistsError:
+            self.notify(f"'{target.name}' already exists", severity="error")
+            return
+        except OSError as e:
+            self.notify(f"Could not create file: {e.strerror}", severity="error")
+            return
+
+        def undo() -> None:
+            try:
+                if os.path.getsize(target) == 0:
+                    os.unlink(target)
+                else:
+                    self.notify("Not undone: the new file now has content", severity="error")
+            except OSError:
+                pass
+            self.refresh_listing()
+
+        self.push_undo(f"new file '{target.name}'", undo, redo=lambda: self._make_file(target))
+        self.refresh_listing(select_name=target.name)
 
     def action_duplicate(self) -> None:
         if self._ro():
@@ -1977,17 +2193,23 @@ class RindApp(App):
                     ("shell", "Open shell here", "t"), None,
                     ("extract", "Extract here", "e", ro or not has), ("compress", "Compress…", "C", ro or not has),
                     None, ("calcsize", "Calculate size", "i", not has),
-                    ("copypath", "Copy path", "", not has), ("props", "Properties…", "P", not has), None,
+                    ("copypath", "Copy path", "", not has), ("dragout", "Drag out  ▸", "g", not has),
+                    ("showfm", "Open folder in file manager", "Alt+F"),
+                    ("props", "Properties…", "P", not has), None,
                     ("unmount", "Unmount device…", "U", not any(d.mounted for d in self.devices)), None,
                     ("quit", "Quit", "q"), ("quitnocd", "Quit without changing folder", "Q")]
         elif name == "Edit":
             rows = [("undo", "Undo: " + self.undo_stack[-1].label if self.undo_stack else "Undo", "z",
-                     not self.undo_stack), None,
+                     not self.undo_stack),
+                    ("redo", "Redo: " + self.redo_stack[-1].label if self.redo_stack else "Redo", "Z",
+                     not self.redo_stack), None,
                     ("cut", "Cut", "x", not has or ro), ("copy", "Copy", "c", not has),
                     ("paste", "Paste" + (f" ({len(self.clip[1])})" if self.clip else ""), "v", no_paste),
                     ("duplicate", "Duplicate", "Ctrl+D", not has or ro or tr),
-                    ("copytab", "Copy to other tab", "y", not has or len(self.tabs) < 2),
-                    ("movetab", "Move to other tab", "Y", not has or ro or len(self.tabs) < 2), None]
+                    ("copytab", "Copy to other pane" if self.split else "Copy to other tab", "y",
+                     not has or len(self.tabs) < 2),
+                    ("movetab", "Move to other pane" if self.split else "Move to other tab", "Y",
+                     not has or ro or len(self.tabs) < 2), None]
             if tr:
                 rows += [("restore", "Restore", "R", not has), ("delete", "Delete permanently…", "d", not has),
                          ("emptytrash", "Empty trash…", "")]
@@ -1997,7 +2219,8 @@ class RindApp(App):
                          ("delete", "Move to trash", "d", not has or ro)]
             rows += [None, ("selectall", "Select all", "Ctrl+A"), ("clearmarks", "Clear selection", "Esc")]
         elif name == "View":
-            rows = [("preview", check(self.preview_on, "Preview pane"), "p"),
+            rows = [("split", check(self.split, "Split view (two panes)"), "F4"),
+                    ("preview", check(self.preview_on, "Preview pane"), "p"),
                     ("hidden", check(self.show_hidden, "Show hidden files"), "."),
                     ("col:git", check(self.show_git, "Git status column"), ""), None,
                     ("sortmenu", "Sort by  ▸", "s"), None]
@@ -2022,19 +2245,23 @@ class RindApp(App):
             if r is None:
                 out.append(None)
                 continue
-            label = r[1].ljust(w + 3) + r[2] if r[2] else r[1]
+            hint = self.key_hint(r[0], r[2])
+            label = r[1].ljust(w + 3) + hint if hint else r[1]
             out.append((r[0], label, bool(len(r) > 3 and r[3])))
         return out
 
     def action_help(self) -> None:
         seen, lines = set(), []
-        for b in FileTable.BINDINGS:
-            if b.description in seen:
+        for ident, (desc, ks) in self.key_info.items():
+            if desc in seen or ident in ("focus_path", "menu_bar"):
                 continue
-            seen.add(b.description)
-            keys = " / ".join(pretty_key(k) for k in b.key.split(","))
-            lines.append(f"{keys:<26}{b.description}")
-        lines += [f"{'Ctrl+L':<26}Edit path (Tab completes)", f"{'F10 / F9 / Alt+M':<26}Menu bar (←/→ switch menus)", "",
+            seen.add(desc)
+            lines.append(f"{' / '.join(pretty_key(k) for k in ks) or '(off)':<26}{desc}")
+        kstr = lambda i: " / ".join(pretty_key(k) for k in self.key_info[i][1]) or "(off)"  # noqa: E731
+        lines += [f"{kstr('focus_path'):<26}Edit path (Tab completes)",
+                  f"{kstr('menu_bar'):<26}Menu bar (←/→ switch menus)",
+                  "", "Files dropped onto the terminal window are copied or moved here.",
+                  "Change any shortcut under [keys] in config.toml (see 'rind --keys').", "",
                   "Mouse: click selects, double-click opens, right-click for the context menu,",
                   "Ctrl+click toggles a mark, Shift+click marks a range, click a column header to sort,",
                   "click a folder name in the path line above the list to jump up to it."]
@@ -2074,12 +2301,17 @@ class RindApp(App):
         ts = self.tabs[self.tab_index]
         ts.cwd, ts.back, ts.forward = self.cwd, self.back, self.forward
         ts.marked, ts.filter_text = set(self.marked), self.filter_text
-        row = self.query_one(FileTable).cursor_row
+        row = self.table.cursor_row
         ts.cursor = self.entries[row][0].name if 0 <= row < len(self.entries) else None
 
     def _activate_tab(self, i: int) -> None:
         self.tab_index = i
         ts = self.tabs[i]
+        if self.split:
+            if ts in self.pane_tabs:
+                self.active_side = self.pane_tabs.index(ts)
+            else:
+                self.pane_tabs[self.active_side] = ts
         self.back, self.forward = ts.back, ts.forward
         target = ts.cwd
         while not target.is_dir() and target != target.parent:
@@ -2118,6 +2350,9 @@ class RindApp(App):
             self._activate_tab(min(i, len(self.tabs) - 1))
         else:
             self.update_tabs()
+        if self.split:
+            self._fix_panes()
+            self.refresh_other_pane()
 
     def action_close_current_tab(self) -> None:
         self.action_close_tab(self.tab_index)
@@ -2139,6 +2374,8 @@ class RindApp(App):
 
     def _to_tab(self, mode: str) -> None:
         others = [i for i in range(len(self.tabs)) if i != self.tab_index]
+        if self.split:
+            others = [self.tabs.index(self.pane_tabs[1 - self.active_side])]
         if not others:
             self.notify("Open a second tab first (Ctrl+T)", severity="warning")
             return
@@ -2159,7 +2396,7 @@ class RindApp(App):
             go(others[0])
             return
         items = [(f"tab:{i}", f"{i + 1}  {self.tab_name(i)}") for i in others]
-        r = self.query_one(FileTable).region
+        r = self.table.region
         self.push_screen(MenuScreen(items, r.x + 4, r.y + 2), lambda c: c and go(int(c[4:])))
 
     def action_copy_to_tab(self) -> None:
@@ -2206,10 +2443,15 @@ class RindApp(App):
             if isinstance(w, PlaceItem):
                 return (w.path, w.path.name or "/") if w.path is not None else (None, "")
             if isinstance(w, FileTable):
+                other = self.split and w.side != self.active_side
+                ents = self.pane_tabs[w.side].entries if other else self.entries
                 row = meta.get("row")
-                if row is not None and 0 <= row < len(self.entries) and self.entries[row][1]:
-                    d = self.entries[row][0]
+                if row is not None and 0 <= row < len(ents) and ents[row][1]:
+                    d = ents[row][0]
                     return (None, "") if d in dragged else (d, d.name)
+                if other:
+                    cwd = self.pane_tabs[w.side].cwd
+                    return cwd, cwd.name or "/"
                 return None, ""
         click = str(meta.get("@click", ""))
         try:
@@ -2229,7 +2471,7 @@ class RindApp(App):
     def cancel_drag(self) -> None:
         if self.drag_state is not None:
             self.drag_state = None
-            self.query_one(FileTable).release_mouse()
+            self.table.release_mouse()
             self.update_status()
 
     def finish_drag(self, x: int, y: int, ctrl: bool) -> None:
@@ -2336,36 +2578,57 @@ class RindApp(App):
         def done(res) -> None:
             if not res or res[0] != "apply" or self._ro():
                 return
-            _, mode, rec = res
-            path = t[0]
-
-            def fin(r) -> None:
-                if isinstance(r, Exception):
-                    self.notify(f"Couldn't change permissions: {getattr(r, 'strerror', None) or r}",
-                                severity="error")
-                    self.refresh_listing()
-                    return
-                changed = r
-                if not changed:
-                    self.notify("Nothing needed changing")
-                    return
-                self.notify(f"Permissions changed on {len(changed)} item{'s' if len(changed) != 1 else ''}")
-
-                def undo() -> None:
-                    errs: list[str] = []
-                    for p, old in reversed(changed):
-                        try:
-                            os.chmod(p, old)
-                        except OSError as e:
-                            errs.append(f"{p.name}: {e.strerror}")
-                    self._after_undo(errs)
-
-                self.push_undo(f"permissions of '{path.name}'", undo)
-                self.refresh_listing()
-
-            self.run_job("Changing permissions", lambda job: fileops.apply_mode(path, mode, rec), fin)
+            _, mode, rec, uid, gid = res
+            self._apply_props(t[0], mode, rec, uid, gid)
 
         self.push_screen(PropertiesScreen(t), done)
+
+    def _apply_props(self, path: Path, mode: int, rec: bool, uid: Optional[int], gid: Optional[int]) -> None:
+        def work(job: Job):
+            modes = fileops.apply_mode(path, mode, rec)
+            try:
+                owners = fileops.apply_owner(path, -1 if uid is None else uid, -1 if gid is None else gid, rec) \
+                    if (uid is not None or gid is not None) else []
+            except OSError:
+                for p, old in reversed(modes):
+                    try:
+                        os.chmod(p, old)
+                    except OSError:
+                        pass
+                raise
+            return modes, owners
+
+        def fin(r) -> None:
+            if isinstance(r, Exception):
+                self.notify(f"Couldn't change properties: {getattr(r, 'strerror', None) or r}", severity="error")
+                self.refresh_listing()
+                return
+            modes, owners = r
+            if not modes and not owners:
+                self.notify("Nothing needed changing")
+                return
+            n = len({p for p, *_ in modes} | {p for p, *_ in owners})
+            self.notify(f"Changed {n} item{'s' if n != 1 else ''}")
+
+            def undo() -> None:
+                errs: list[str] = []
+                for p, ou, og in reversed(owners):
+                    try:
+                        os.lchown(p, ou, og)
+                    except OSError as e:
+                        errs.append(f"{p.name}: {e.strerror}")
+                for p, old in reversed(modes):
+                    try:
+                        os.chmod(p, old)
+                    except OSError as e:
+                        errs.append(f"{p.name}: {e.strerror}")
+                self._after_undo(errs)
+
+            self.push_undo(f"properties of '{path.name}'", undo,
+                           redo=lambda: self._apply_props(path, mode, rec, uid, gid))
+            self.refresh_listing()
+
+        self.run_job("Changing properties", work, fin)
 
     def action_open_with(self) -> None:
         t = self.targets()
@@ -2382,11 +2645,7 @@ class RindApp(App):
                 return
             kind, value, remember = res
             if kind == "default":
-                for base in (["xdg-open"], ["gio", "open"], ["open"]):
-                    if shutil.which(base[0]):
-                        self._launch(base + [str(path)], False)
-                        return
-                self.notify("No system opener found (install xdg-utils)", severity="error")
+                self._start(launcher.system_open_candidates(path), path.name)
                 return
             spec = {"desktop": value} if kind == "desktop" else {"cmd": value}
             resolved = openwith.resolve(spec, path)
@@ -2397,9 +2656,96 @@ class RindApp(App):
             if remember and ext:
                 openwith.remember(ext, spec)
                 self.notify(f"Will use it for .{ext} files (unless your config says otherwise)")
-            self._launch(*resolved)
+            self._launch(*resolved, label=path.name)
 
         self.push_screen(OpenWithScreen(path, apps), done)
+
+    # ----- files dropped onto the terminal
+    def handle_drop(self, text: str) -> None:
+        """Terminals paste the path of a file dropped on them; offer to copy or move it here."""
+        paths = dragout.parse_dropped(text)
+        if not paths:
+            self.notify("The pasted text isn't an existing file path, so there is nothing to copy or move",
+                        severity="warning")
+            return
+        if self._ro():
+            return
+        if self.in_trash:
+            self.notify("Can't drop files into the trash", severity="warning")
+            return
+        if self.drop_action in ("copy", "move"):
+            self._start_transfer(self.drop_action, paths, self.cwd)
+            return
+        label = self._label_for(paths)
+        items = [("copy", f"Copy {label} here"), ("move", f"Move {label} here"), None, ("cancel", "Cancel")]
+        w, h = self.size
+        self.push_screen(MenuScreen(items, max(0, w // 2 - 18), max(1, h // 3)),
+                         lambda c: self._start_transfer(c, paths, self.cwd) if c in ("copy", "move") else None)
+
+    # ----- dragging files out of rind (a terminal can't start a real drag)
+    def _drag_paths(self) -> Optional[list]:
+        if self.in_archive:
+            self.notify("Extract the archive first (e), then take the files out", severity="warning")
+            return None
+        t = self.targets()
+        if not t:
+            self.notify("Nothing selected", severity="warning")
+        return t or None
+
+    def action_copy_to_system(self) -> None:
+        t = self._drag_paths()
+        if not t:
+            return
+        ok, msg = dragout.copy_to_clipboard(t, str(self.drag_cfg.get("clipboard_format", "auto")))
+        self.notify(msg, severity="information" if ok else "error", timeout=6 if ok else 12)
+
+    def action_drag_helper(self) -> None:
+        t = self._drag_paths()
+        if not t:
+            return
+        args = self.drag_cfg.get("helper_args")
+        argv = dragout.helper_argv(t, str(self.drag_cfg.get("helper") or ""),
+                                   str(args) if args is not None else None)
+        if argv is None:
+            self.notify("No drag helper found. Install ripdrag or dragon, or set helper under [drag] "
+                        "in config.toml.", severity="error", timeout=12)
+            return
+        self._start([argv], "the drag window")
+
+    def action_show_in_file_manager(self) -> None:
+        if self.in_archive:
+            self.notify("Extract the archive first (e)", severity="warning")
+            return
+        cands = dragout.file_manager_candidates(self.cwd, self.targets(),
+                                                str(self.drag_cfg.get("file_manager") or ""),
+                                                bool(self.drag_cfg.get("reveal_selection", True)))
+        self._start(cands, "this folder in your file manager")
+
+    def action_drag_out(self) -> None:
+        table = self.table
+        r = table.region
+        y = max(r.y + 1, r.y + 2 + table.cursor_row - int(table.scroll_y))
+        self.show_drag_menu(r.x + 4, y)
+
+    def show_drag_menu(self, x: int, y: int) -> None:
+        helper = dragout.find_helper(str(self.drag_cfg.get("helper") or ""))
+        hname = Path(helper[0]).name if helper else "install ripdrag or dragon"
+        none = not self.targets()
+        items = [("clipfiles", "Copy files to the system clipboard", none),
+                 ("dragwin", f"Drag window  ({hname})", none),
+                 ("showfm", "Show in file manager")]
+        self.push_screen(MenuScreen(items, x, y), lambda c: self.run_menu_choice(c, x, y))
+
+    def key_hint(self, choice: str, default: str) -> str:
+        """The first key of a menu item's action, as configured."""
+        ident = MENU_KEY_IDS.get(choice)
+        if ident is None or ident not in self.key_info:
+            return default
+        ks = self.key_info[ident][1]
+        if not ks:
+            return ""
+        first = ks[0]
+        return first if len(first) == 1 else pretty_key(first).replace("Pagedown", "PgDn").replace("Pageup", "PgUp")
 
     # ----- updates
     def action_check_updates(self) -> None:
@@ -2480,7 +2826,7 @@ class RindApp(App):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "filter":
-            self.query_one(FileTable).focus()
+            self.table.focus()
             return
         if event.input.id != "path":
             return
